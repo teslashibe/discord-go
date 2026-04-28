@@ -2,7 +2,6 @@ package discord
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 
 	"github.com/bwmarrin/discordgo"
@@ -57,6 +56,5 @@ func (c *Client) Status(ctx context.Context) (StatusReport, error) {
 			rep.StoreDir = abs
 		}
 	}
-	_ = os.Stat // keep os import for parity with sibling packages
 	return rep, nil
 }

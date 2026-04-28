@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -37,9 +36,12 @@ func (c *Client) ListMembers(ctx context.Context, params MemberListParams) ([]Me
 }
 
 // ResolveUser looks up a user. Accepts a snowflake ID, a "<@123>" or
-// "<@!123>" mention, or a username#discriminator handle (legacy). For
-// the username form the bot must share a guild with the user (resolves
-// via guild member search).
+// "<@!123>" mention, or a username#discriminator handle (legacy).
+//
+// The username form is O(N guilds): the bot must share a guild with
+// the user, and we GuildMembersSearch each guild until a match. For
+// bots in many guilds prefer passing a snowflake or mention so the
+// resolver can short-circuit on the first REST call.
 func (c *Client) ResolveUser(ctx context.Context, ref string) (User, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -114,7 +116,7 @@ func convertMember(m *discordgo.Member, guildID string) Member {
 	out := Member{
 		GuildID:  guildID,
 		Nick:     m.Nick,
-		JoinedAt: timeOr(m.JoinedAt),
+		JoinedAt: m.JoinedAt,
 		Roles:    append([]string(nil), m.Roles...),
 	}
 	if m.User != nil {
@@ -156,4 +158,3 @@ func splitHandle(s string) (username, discriminator string) {
 	return s, ""
 }
 
-func timeOr(t time.Time) time.Time { return t }

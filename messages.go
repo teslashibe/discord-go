@@ -88,6 +88,10 @@ func (c *Client) getMessagesLocal(ctx context.Context, channelID string, limit i
 	if db == nil {
 		return nil, ErrNotConnected
 	}
+	// Audit fix (H1): Snowflakes are 17–20-digit numbers and lexicographic
+	// comparison on msg_id breaks across different lengths (older accounts
+	// have shorter ids). Cast to INTEGER for the pagination predicate so
+	// "before this id" actually means "older than this id".
 	q := `SELECT rowid, msg_id, channel_id, COALESCE(guild_id,''),
               COALESCE(author_id,''), COALESCE(author_name,''), is_from_me,
               COALESCE(body,''), has_media, COALESCE(reply_to_id,''),
@@ -95,7 +99,7 @@ func (c *Client) getMessagesLocal(ctx context.Context, channelID string, limit i
          FROM messages WHERE channel_id = ?`
 	args := []any{channelID}
 	if beforeID != "" {
-		q += ` AND msg_id < ?`
+		q += ` AND CAST(msg_id AS INTEGER) < CAST(? AS INTEGER)`
 		args = append(args, beforeID)
 	}
 	q += ` ORDER BY timestamp DESC LIMIT ?`

@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -263,5 +262,3 @@ func defaultStoreDir() string {
 	return filepath.Join(home, "Library", "Application Support", "teslashibe", "discord-go")
 }
 
-// retained for symmetry with sibling packages; lifecycle helper.
-var _ = time.Now

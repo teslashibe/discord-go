@@ -38,7 +38,20 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.installEventHandlers(sess)
 
+	// Audit fix (H2): publish the session to c BEFORE Open() so that a
+	// concurrent Close() can tear it down even if Open's goroutines
+	// have already started consuming events. We mark connected=false
+	// during the open window; methods that need the session block on
+	// the connected flag.
+	c.mu.Lock()
+	c.session = sess
+	c.connected = false
+	c.mu.Unlock()
+
 	if err := sess.Open(); err != nil {
+		c.mu.Lock()
+		c.session = nil
+		c.mu.Unlock()
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}
 	// Verify the token by hitting /users/@me. This catches revoked /
@@ -46,11 +59,13 @@ func (c *Client) Connect(ctx context.Context) error {
 	self, err := sess.User("@me")
 	if err != nil {
 		_ = sess.Close()
+		c.mu.Lock()
+		c.session = nil
+		c.mu.Unlock()
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}
 
 	c.mu.Lock()
-	c.session = sess
 	c.connected = true
 	c.selfUser = self
 	c.mu.Unlock()
