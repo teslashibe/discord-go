@@ -6,11 +6,12 @@
 .vscode/
 .DS_Store
 
-# Bot tokens, local state — NEVER commit these
+# User token + local state — NEVER commit these
 .env
 .env.*
 !.env.example
 *.token
+discord_token.txt
 secrets/
 messages.db
 messages.db-journal
