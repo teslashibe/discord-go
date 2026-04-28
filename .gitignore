@@ -1,0 +1,18 @@
+*.test
+*.out
+/coverage.out
+/vendor/
+.idea/
+.vscode/
+.DS_Store
+
+# Bot tokens, local state — NEVER commit these
+.env
+.env.*
+!.env.example
+*.token
+secrets/
+messages.db
+messages.db-journal
+messages.db-wal
+messages.db-shm
