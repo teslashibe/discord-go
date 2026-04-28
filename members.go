@@ -52,6 +52,12 @@ func (c *Client) ListMembers(ctx context.Context, params MemberListParams) ([]Me
 // ResolveUser looks up a user. Accepts a snowflake id, "<@id>" or
 // "<@!id>" mention, or username/global-name fragment (latter requires
 // shared guild and uses guild member search).
+//
+// Cost note: the username/global-name path is O(N guilds) HTTP calls
+// because Discord doesn't expose a global user-search endpoint to user
+// accounts; pass a snowflake or mention whenever you can to short-
+// circuit. Discord deprecated #discriminator handles in 2023, but the
+// "alice#1234" form is still parsed for back-compat.
 func (c *Client) ResolveUser(ctx context.Context, ref string) (User, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -66,14 +72,16 @@ func (c *Client) ResolveUser(ctx context.Context, ref string) (User, error) {
 		})
 		return u, err
 	}
-	// Username / global-name search across guilds the user is in.
-	// O(N guilds) — recommend callers pass a snowflake or mention to
-	// short-circuit.
+
 	username, disc := splitHandle(ref)
 	guilds, err := c.ListGuilds(ctx, GuildListParams{Limit: 200})
 	if err != nil {
 		return User{}, err
 	}
+	// Match either the modern unique username (lowercase, no #) or the
+	// global_name (display name) — Discord's pomelo migration left
+	// both fields populated on member objects.
+	wantLow := strings.ToLower(username)
 	for _, g := range guilds {
 		hits, err := c.guildMembersSearch(ctx, g.ID, username, 5)
 		if err != nil {
@@ -83,7 +91,7 @@ func (c *Client) ResolveUser(ctx context.Context, ref string) (User, error) {
 			if disc != "" && m.User.Discriminator != disc {
 				continue
 			}
-			if !strings.EqualFold(m.User.Username, username) &&
+			if strings.ToLower(m.User.Username) != wantLow &&
 				!strings.EqualFold(m.User.GlobalName, username) {
 				continue
 			}

@@ -142,18 +142,18 @@ func (c *Client) getMessagesLocal(ctx context.Context, channelID string, limit i
 
 // rawMessage is the shape Discord returns.
 type rawMessage struct {
-	ID               string     `json:"id"`
-	ChannelID        string     `json:"channel_id"`
-	GuildID          string     `json:"guild_id,omitempty"`
-	Author           User       `json:"author"`
-	Content          string     `json:"content"`
-	Timestamp        time.Time  `json:"timestamp"`
-	EditedTimestamp  *time.Time `json:"edited_timestamp"`
-	Attachments      []struct {
+	ID              string     `json:"id"`
+	ChannelID       string     `json:"channel_id"`
+	GuildID         string     `json:"guild_id,omitempty"`
+	Author          User       `json:"author"`
+	Content         string     `json:"content"`
+	Timestamp       time.Time  `json:"timestamp"`
+	EditedTimestamp *time.Time `json:"edited_timestamp"`
+	Attachments     []struct {
 		URL string `json:"url"`
 	} `json:"attachments"`
-	Mentions         []User     `json:"mentions"`
-	Pinned           bool       `json:"pinned"`
+	Mentions         []User `json:"mentions"`
+	Pinned           bool   `json:"pinned"`
 	MessageReference *struct {
 		MessageID string `json:"message_id"`
 		ChannelID string `json:"channel_id"`

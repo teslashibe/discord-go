@@ -16,7 +16,6 @@ package discord
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -166,6 +165,14 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // Connect verifies the token by hitting /users/@me. Subsequent calls
 // before Close return ErrAlreadyConnected.
+//
+// Race notes (audit):
+//   - Close() racing with Connect() between any two unlocked steps is
+//     handled: every "publish" step re-checks c.closed under lock and
+//     bails out (closing whatever has been opened so far) so we don't
+//     leak a doer or a sql.DB on a closed client.
+//   - The doer is published BEFORE the probe AND connected=false, so
+//     a concurrent caller sees "not connected" until probe succeeds.
 func (c *Client) Connect(ctx context.Context) error {
 	if err := c.validateConfig(); err != nil {
 		return err
@@ -199,6 +206,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClosed
+	}
 	c.doer = doer
 	c.mu.Unlock()
 
@@ -220,6 +231,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	if c.closed {
+		// Close raced with us during the probe; respect it.
+		c.doer = nil
+		c.mu.Unlock()
+		return ErrClosed
+	}
 	c.selfUser = &u
 	c.connected = true
 	c.mu.Unlock()
@@ -227,11 +244,13 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // Disconnect zeroes the live transport but keeps the store + config so
-// the client can Connect again.
+// the client can Connect again. selfUser is also cleared so Status no
+// longer reports a stale "Authorized=true" after disconnect.
 func (c *Client) Disconnect() error {
 	c.mu.Lock()
 	c.doer = nil
 	c.connected = false
+	c.selfUser = nil
 	c.mu.Unlock()
 	return nil
 }
@@ -248,6 +267,7 @@ func (c *Client) Close() error {
 	c.logDB = nil
 	c.doer = nil
 	c.connected = false
+	c.selfUser = nil
 	c.mu.Unlock()
 	if logDB != nil {
 		return logDB.Close()
@@ -318,10 +338,12 @@ func (c *Client) validateConfig() error {
 		return fmt.Errorf("%w: Config.Token is required", ErrInvalidParams)
 	}
 	// Discord user tokens are <id>.<ts>.<sig> base64 chunks.
-	// Bot tokens start with "Bot " or are clearly bot-shaped — refuse
-	// them so callers don't try to drive this client with one (they'd
-	// hit user-only endpoints and fail in confusing ways).
-	if strings.HasPrefix(tok, "Bot ") || strings.HasPrefix(tok, "Bearer ") {
+	// Bot tokens are usually prefixed with "Bot " — refuse any
+	// case-variant of "Bot "/"Bearer " so callers don't try to drive
+	// this client with one (they'd hit user-only endpoints and fail in
+	// confusing ways).
+	low := strings.ToLower(tok)
+	if strings.HasPrefix(low, "bot ") || strings.HasPrefix(low, "bearer ") {
 		return fmt.Errorf("%w: pass the raw user token (no Bot/Bearer prefix). For bots use the official bot API instead", ErrInvalidParams)
 	}
 	return nil
@@ -354,5 +376,3 @@ func defaultStoreDir() string {
 	}
 	return filepath.Join(home, "Library", "Application Support", "teslashibe", "discord-go")
 }
-
-var _ = errors.Is // reserved for future error-classification helpers

@@ -22,11 +22,11 @@ func (c *Client) ListGuilds(ctx context.Context, params GuildListParams) ([]Guil
 	q := url.Values{}
 	q.Set("with_counts", "true")
 	var raw []struct {
-		ID                       string `json:"id"`
-		Name                     string `json:"name"`
-		OwnerID                  string `json:"owner_id"`
-		Icon                     string `json:"icon"`
-		ApproximateMemberCount   int    `json:"approximate_member_count"`
+		ID                     string `json:"id"`
+		Name                   string `json:"name"`
+		OwnerID                string `json:"owner_id"`
+		Icon                   string `json:"icon"`
+		ApproximateMemberCount int    `json:"approximate_member_count"`
 	}
 	err := c.withDoer(func(d *transport.Doer) error {
 		return d.JSON(ctx, http.MethodGet, "/api/v9/users/@me/guilds", nil, &raw, q)

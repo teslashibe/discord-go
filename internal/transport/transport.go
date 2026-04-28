@@ -27,6 +27,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,7 +42,6 @@ const MaxBody = 16 << 10 // 16 KiB
 const (
 	defaultUserAgent      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 	defaultBuildNumber    = 308352
-	defaultClientVersion  = "1.0.9032"
 	defaultLocale         = "en-US"
 	defaultMaxRetries     = 3
 	defaultMinGap         = 500 * time.Millisecond
@@ -59,11 +59,14 @@ type Doer struct {
 	locale      string
 	timezone    string
 	buildNumber int
-	clientVer   string
 
-	gateMu  sync.Mutex
-	lastCall time.Time
-	minGap   time.Duration
+	// superProps is computed once at New() and cached because Discord's
+	// X-Super-Properties payload is constant across the client's life.
+	superProps string
+
+	gateMu     sync.Mutex
+	lastCall   time.Time
+	minGap     time.Duration
 	maxRetries int
 
 	// Rate-limit state surfaced via RateLimit().
@@ -87,14 +90,19 @@ type Options struct {
 	Locale      string
 	Timezone    string
 	BuildNumber int
-	ClientVer   string
 	MinGap      time.Duration
 	MaxRetries  int
 	Logger      Logger
-	HTTPClient  *http.Client
+	// HTTPClient is optional; it is shallow-cloned before use so the
+	// caller's Jar / Transport / CheckRedirect are not mutated.
+	HTTPClient *http.Client
 }
 
 // New constructs a Doer.
+//
+// If opts.HTTPClient is supplied it is shallow-cloned and its Jar +
+// CheckRedirect are overwritten with internal values; the caller's
+// own *http.Client is never mutated.
 func New(opts Options) (*Doer, error) {
 	if opts.Token == "" {
 		return nil, errors.New("transport: Token required")
@@ -103,12 +111,10 @@ func New(opts Options) (*Doer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("transport: cookie jar: %w", err)
 	}
-	hc := opts.HTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: defaultRequestTimeout, Jar: jar}
-	} else {
-		hc.Jar = jar
-	}
+	hc := cloneHTTPClient(opts.HTTPClient)
+	hc.Jar = jar
+	hc.CheckRedirect = stripAuthOnCrossOrigin
+
 	d := &Doer{
 		httpClient:  hc,
 		jar:         jar,
@@ -118,14 +124,61 @@ func New(opts Options) (*Doer, error) {
 		locale:      firstNonEmpty(opts.Locale, defaultLocale),
 		timezone:    firstNonEmpty(opts.Timezone, "America/Los_Angeles"),
 		buildNumber: orInt(opts.BuildNumber, defaultBuildNumber),
-		clientVer:   firstNonEmpty(opts.ClientVer, defaultClientVersion),
 		minGap:      orDuration(opts.MinGap, defaultMinGap),
 		maxRetries:  orInt(opts.MaxRetries, defaultMaxRetries),
 	}
 	if d.logger == nil {
 		d.logger = nopLogger{}
 	}
+	d.superProps = computeSuperProperties(d.locale, d.userAgent, d.buildNumber)
 	return d, nil
+}
+
+// cloneHTTPClient returns a fresh *http.Client whose fields mirror the
+// caller's, so we can mutate Jar/CheckRedirect freely.
+func cloneHTTPClient(src *http.Client) *http.Client {
+	if src == nil {
+		return &http.Client{Timeout: defaultRequestTimeout}
+	}
+	out := *src // shallow copy of value-typed fields (Timeout, Transport pointer, etc.)
+	if out.Timeout <= 0 {
+		out.Timeout = defaultRequestTimeout
+	}
+	return &out
+}
+
+// stripAuthOnCrossOrigin is a CheckRedirect that ensures the user
+// token is never forwarded to a host other than discord.com — Go's
+// default redirect handler keeps Authorization across same-host hops
+// (and only since Go 1.8 strips it across hosts), but we double-belt
+// it here in case any future Go default changes or any non-discord
+// proxy is involved.
+func stripAuthOnCrossOrigin(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if len(via) >= 10 {
+		return errors.New("transport: stopped after 10 redirects")
+	}
+	prev := via[len(via)-1]
+	if !sameDiscordHost(prev.URL.Host, req.URL.Host) {
+		req.Header.Del("Authorization")
+		req.Header.Del("Cookie")
+	}
+	return nil
+}
+
+func sameDiscordHost(a, b string) bool {
+	if a == b {
+		return true
+	}
+	// Allow discord.com ↔ www.discord.com hops.
+	const root = "discord.com"
+	return endsWith(a, root) && endsWith(b, root)
+}
+
+func endsWith(s, suffix string) bool {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
 // CookieJar exposes the jar (for tests).
@@ -159,11 +212,11 @@ func (d *Doer) do(ctx context.Context, method, path string, body any, out any, q
 
 	u := BaseURL + path
 	if len(q) > 0 {
-		if hasQ := containsByte(path, '?'); hasQ {
-			u = u + "&" + q.Encode()
-		} else {
-			u = u + "?" + q.Encode()
+		sep := "?"
+		if strings.IndexByte(path, '?') >= 0 {
+			sep = "&"
 		}
+		u = u + sep + q.Encode()
 	}
 
 	var bodyReader io.Reader
@@ -268,7 +321,7 @@ func (d *Doer) applyHeaders(req *http.Request, hasBody bool) {
 	h.Set("Referer", "https://discord.com/channels/@me")
 	h.Set("X-Discord-Locale", d.locale)
 	h.Set("X-Discord-Timezone", d.timezone)
-	h.Set("X-Super-Properties", d.superProperties())
+	h.Set("X-Super-Properties", d.superProps)
 	h.Set("X-Debug-Options", "bugReporterEnabled")
 	h.Set("Sec-Fetch-Dest", "empty")
 	h.Set("Sec-Fetch-Mode", "cors")
@@ -281,15 +334,16 @@ func (d *Doer) applyHeaders(req *http.Request, hasBody bool) {
 	}
 }
 
-// superProperties is the X-Super-Properties header that Discord's web
-// client sends. base64(JSON of os/browser/build info). See README.
-func (d *Doer) superProperties() string {
+// computeSuperProperties returns the X-Super-Properties header that
+// Discord's web client sends — base64(JSON of os/browser/build info).
+// Constant for the lifetime of a Doer; cached on the struct.
+func computeSuperProperties(locale, ua string, build int) string {
 	props := map[string]any{
 		"os":                       "Mac OS X",
 		"browser":                  "Chrome",
 		"device":                   "",
-		"system_locale":            d.locale,
-		"browser_user_agent":       d.userAgent,
+		"system_locale":            locale,
+		"browser_user_agent":       ua,
 		"browser_version":          "124.0.0.0",
 		"os_version":               "10.15.7",
 		"referrer":                 "",
@@ -297,7 +351,7 @@ func (d *Doer) superProperties() string {
 		"referrer_current":         "",
 		"referring_domain_current": "",
 		"release_channel":          "stable",
-		"client_build_number":      d.buildNumber,
+		"client_build_number":      build,
 		"client_event_source":      nil,
 	}
 	buf, _ := json.Marshal(props)
@@ -436,17 +490,67 @@ func parseRetryAfter(h http.Header) time.Duration {
 	if n, err := strconv.ParseFloat(v, 64); err == nil {
 		return time.Duration(n * float64(time.Second))
 	}
+	// HTTP-date format (RFC 7231 §7.1.3). Discord rarely uses this,
+	// but Cloudflare 503s during ops do.
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
 	return 0
 }
 
 func looksCloudflareBlocked(resp *http.Response, body []byte) bool {
-	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
+	// CF can fire on 403 (challenge), 503 (under attack mode), and
+	// occasionally 401 when the WAF mistakes the request for an attack.
+	switch resp.StatusCode {
+	case http.StatusForbidden, http.StatusServiceUnavailable, http.StatusUnauthorized:
+	default:
 		return false
 	}
-	if h := resp.Header.Get("Server"); h == "cloudflare" {
-		if bytes.Contains(body, []byte("Just a moment")) ||
-			bytes.Contains(body, []byte("Attention Required")) ||
-			bytes.Contains(body, []byte("cf-error-details")) {
+	server := resp.Header.Get("Server")
+	cfRay := resp.Header.Get("Cf-Ray")
+	cfMit := resp.Header.Get("Cf-Mitigated")
+	if cfRay == "" && !containsCaseInsensitive(server, "cloudflare") {
+		return false
+	}
+	if cfMit != "" {
+		// Set explicitly by Cloudflare when it fires a managed challenge.
+		return true
+	}
+	if bytes.Contains(body, []byte("Just a moment")) ||
+		bytes.Contains(body, []byte("Attention Required")) ||
+		bytes.Contains(body, []byte("cf-error-details")) ||
+		bytes.Contains(body, []byte("challenge-platform")) {
+		return true
+	}
+	return false
+}
+
+func containsCaseInsensitive(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			a := haystack[i+j]
+			b := needle[j]
+			if a >= 'A' && a <= 'Z' {
+				a += 32
+			}
+			if b >= 'A' && b <= 'Z' {
+				b += 32
+			}
+			if a != b {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}
@@ -458,15 +562,6 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-func containsByte(s string, b byte) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return true
-		}
-	}
-	return false
 }
 
 func firstNonEmpty(s ...string) string {

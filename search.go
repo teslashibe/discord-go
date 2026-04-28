@@ -12,7 +12,9 @@ import (
 
 // SearchMessages runs Discord's user-only search endpoint. Either
 // GuildID or ChannelID (DM-scoped) must be provided. Discord returns
-// matches in pages of 25; pass Offset to paginate.
+// matches in pages of 25; if Limit > 25 SearchMessages auto-paginates
+// (using Offset) up to a hard internal cap of 200 matches per call to
+// keep the rate-limit envelope sane.
 //
 // The endpoint is rate-limited per-guild and the index lags real-time
 // by a few seconds (Discord uses Elasticsearch behind it). For
@@ -24,6 +26,53 @@ func (c *Client) SearchMessages(ctx context.Context, p SearchParams) (SearchResu
 	if p.Query == "" && p.AuthorID == "" && !p.HasLink && !p.HasFile && !p.HasImage && !p.HasVideo {
 		return SearchResult{}, fmt.Errorf("%w: at least one of Query / AuthorID / Has* required", ErrInvalidParams)
 	}
+	limit := p.Limit
+	if limit <= 0 {
+		limit = 25
+	}
+	const hardCap = 200
+	if limit > hardCap {
+		limit = hardCap
+	}
+
+	c.mu.RLock()
+	selfID := ""
+	if c.selfUser != nil {
+		selfID = c.selfUser.ID
+	}
+	c.mu.RUnlock()
+
+	out := SearchResult{}
+	offset := p.Offset
+	for len(out.Messages) < limit {
+		page, total, err := c.searchPage(ctx, p, offset)
+		if err != nil {
+			return out, err
+		}
+		out.TotalResults = total
+		if len(page) == 0 {
+			break
+		}
+		for _, m := range page {
+			if len(out.Messages) >= limit {
+				break
+			}
+			if selfID != "" && m.Author.ID == selfID {
+				m.IsFromMe = true
+			}
+			_ = c.upsertMessage(ctx, m)
+			out.Messages = append(out.Messages, m)
+		}
+		offset += len(page)
+		if offset >= total {
+			break
+		}
+	}
+	return out, nil
+}
+
+// searchPage fetches a single 25-row Discord search page.
+func (c *Client) searchPage(ctx context.Context, p SearchParams, offset int) ([]Message, int, error) {
 	q := url.Values{}
 	if p.Query != "" {
 		q.Set("content", p.Query)
@@ -34,8 +83,8 @@ func (c *Client) SearchMessages(ctx context.Context, p SearchParams) (SearchResu
 	if p.ChannelID != "" {
 		q.Set("channel_id", p.ChannelID)
 	}
-	if p.Offset > 0 {
-		q.Set("offset", strconv.Itoa(p.Offset))
+	if offset > 0 {
+		q.Set("offset", strconv.Itoa(offset))
 	}
 	if p.HasLink {
 		q.Add("has", "link")
@@ -49,59 +98,29 @@ func (c *Client) SearchMessages(ctx context.Context, p SearchParams) (SearchResu
 	if p.HasVideo {
 		q.Add("has", "video")
 	}
-
-	// path = /api/v9/guilds/{id}/messages/search OR
-	//        /api/v9/channels/{id}/messages/search (DM scope)
 	var path string
 	if p.GuildID != "" {
 		path = "/api/v9/guilds/" + url.PathEscape(p.GuildID) + "/messages/search"
 	} else {
 		path = "/api/v9/channels/" + url.PathEscape(p.ChannelID) + "/messages/search"
 	}
-
-	// Discord's search response wraps matches in [[hit]] arrays.
 	var raw struct {
-		TotalResults     int            `json:"total_results"`
-		Messages         [][]rawMessage `json:"messages"`
-		AnalyticsID      string         `json:"analytics_id,omitempty"`
-		DocLimitExceeded bool           `json:"doc_limit_exceeded,omitempty"`
+		TotalResults int            `json:"total_results"`
+		Messages     [][]rawMessage `json:"messages"`
 	}
 	err := c.withDoer(func(d *transport.Doer) error {
 		return d.JSON(ctx, http.MethodGet, path, nil, &raw, q)
 	})
 	if err != nil {
-		return SearchResult{}, err
+		return nil, 0, err
 	}
-
-	c.mu.RLock()
-	selfID := ""
-	if c.selfUser != nil {
-		selfID = c.selfUser.ID
-	}
-	c.mu.RUnlock()
-
-	out := SearchResult{TotalResults: raw.TotalResults}
-	limit := p.Limit
-	if limit <= 0 {
-		limit = len(raw.Messages)
-	}
+	out := make([]Message, 0, len(raw.Messages))
 	for _, group := range raw.Messages {
-		if limit <= 0 {
-			break
-		}
-		// Each hit-group is the matched message + context; the hit is
-		// always the first element. Lower the noise by surfacing just
-		// the hit.
 		if len(group) == 0 {
 			continue
 		}
-		m := convertMessage(group[0])
-		if selfID != "" && m.Author.ID == selfID {
-			m.IsFromMe = true
-		}
-		_ = c.upsertMessage(ctx, m)
-		out.Messages = append(out.Messages, m)
-		limit--
+		// Each hit-group is the matched message + context; surface the hit only.
+		out = append(out, convertMessage(group[0]))
 	}
-	return out, nil
+	return out, raw.TotalResults, nil
 }

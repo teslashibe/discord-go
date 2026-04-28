@@ -13,16 +13,16 @@ type Guild struct {
 
 // Channel is a guild channel or DM/GroupDM channel.
 type Channel struct {
-	ID            string   `json:"id"`
-	GuildID       string   `json:"guild_id,omitempty"`
-	Name          string   `json:"name"`
-	Type          string   `json:"type"`
-	Topic         string   `json:"topic,omitempty"`
-	NSFW          bool     `json:"nsfw,omitempty"`
-	ParentID      string   `json:"parent_id,omitempty"`
-	Position      int      `json:"position,omitempty"`
-	Recipients    []User   `json:"recipients,omitempty"`     // populated for DM / group DM
-	LastMessageID string   `json:"last_message_id,omitempty"`
+	ID            string `json:"id"`
+	GuildID       string `json:"guild_id,omitempty"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	Topic         string `json:"topic,omitempty"`
+	NSFW          bool   `json:"nsfw,omitempty"`
+	ParentID      string `json:"parent_id,omitempty"`
+	Position      int    `json:"position,omitempty"`
+	Recipients    []User `json:"recipients,omitempty"` // populated for DM / group DM
+	LastMessageID string `json:"last_message_id,omitempty"`
 }
 
 // User is a Discord account.

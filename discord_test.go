@@ -129,11 +129,11 @@ func TestStripMention(t *testing.T) {
 
 func TestIsSnowflake(t *testing.T) {
 	cases := map[string]bool{
-		"123456789012345678": true,
-		"12345":              false, // too short
+		"123456789012345678":    true,
+		"12345":                 false, // too short
 		"123456789012345678901": false, // too long
-		"123abc456789012345": false, // non-numeric
-		"":                  false,
+		"123abc456789012345":    false, // non-numeric
+		"":                      false,
 	}
 	for in, want := range cases {
 		if got := isSnowflake(in); got != want {

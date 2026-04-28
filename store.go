@@ -11,10 +11,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// initLogStore opens (or creates) <storeDir>/messages.db. Idempotent.
+// initLogStore opens (or creates) <storeDir>/messages.db. Idempotent
+// + safe under concurrent calls: the entire open/ping/migrate runs
+// inside c.mu so we can't end up with two *sql.DB handles racing for
+// the same file's SQLITE_BUSY lock. Init is fast enough (single-digit
+// ms) that the lock-hold cost is invisible.
 func (c *Client) initLogStore(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return ErrClosed
+	}
 	if c.logDB != nil {
 		return nil
 	}
@@ -135,6 +142,27 @@ ON CONFLICT(id) DO UPDATE SET
   last_seen = MAX(COALESCE(channels.last_seen, 0), excluded.last_seen)`,
 		ch.ID, nullable(ch.GuildID), ch.Name, ch.Type, time.Now().UnixMilli(),
 	)
+}
+
+// lastSeenMessageID returns the highest msg_id we've stored for a
+// channel (numerically), or "" if none. Used by Watch to ask Discord
+// for "everything since I last polled" instead of just the most recent
+// page (which silently dropped messages during high-traffic windows).
+func (c *Client) lastSeenMessageID(ctx context.Context, channelID string) string {
+	c.mu.RLock()
+	db := c.logDB
+	c.mu.RUnlock()
+	if db == nil || channelID == "" {
+		return ""
+	}
+	var id string
+	err := db.QueryRowContext(ctx,
+		`SELECT msg_id FROM messages WHERE channel_id = ?
+         ORDER BY CAST(msg_id AS INTEGER) DESC LIMIT 1`, channelID).Scan(&id)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 func (c *Client) storedMessageCount(ctx context.Context) int64 {

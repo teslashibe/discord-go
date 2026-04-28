@@ -3,6 +3,8 @@ package discord
 import (
 	"context"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // Watch returns messages newer than params.SinceRowID from the local
@@ -43,12 +45,18 @@ func (c *Client) Watch(ctx context.Context, params WatchParams) (WatchResult, er
 			if ch == "" {
 				continue
 			}
-			// Pull only the most recent N to keep request volume low.
-			if _, err := c.GetMessages(ctx, MessageListParams{
-				ChannelID: ch,
-				Limit:     25,
-			}); err != nil {
-				c.logger.Warn("watch: poll channel failed")
+			// Use after_id = highest snowflake we've already stored for
+			// this channel so a busy channel with >25 new messages
+			// doesn't silently drop the older ones (Discord paginates
+			// from newest backwards by default).
+			plp := MessageListParams{ChannelID: ch, Limit: 100}
+			if last := c.lastSeenMessageID(ctx, ch); last != "" {
+				plp.AfterID = last
+			}
+			if _, err := c.GetMessages(ctx, plp); err != nil {
+				c.logger.Warn("watch: poll channel failed",
+					zap.String("channel_id", ch),
+					zap.Error(err))
 				// Don't fail the whole Watch — the local cursor still
 				// advances over anything we DID manage to fetch.
 				continue
